@@ -15,14 +15,8 @@ Virgo
     <a href="https://github.com/gianmarcopicarella/virgo/releases" target="_blank">
         <img src="https://img.shields.io/github/tag/gianmarcopicarella/virgo.svg" alt="GitHub tag (latest SemVer)">
     </a>
-    <a href="https://github.com/gianmarcopicarella/virgo/commits/master" target="_blank">
-        <img src="https://img.shields.io/github/commit-activity/y/gianmarcopicarella/virgo.svg" alt="GitHub commit activity">
-    </a>
     <a href="https://github.com/gianmarcopicarella/virgo/graphs/contributors" target="_blank">
         <img src="https://img.shields.io/github/contributors-anon/gianmarcopicarella/virgo.svg" alt="GitHub contributors">
-    </a>
-    <a href="https://packagist.org/packages/gianmarcopicarella/virgo" target="_blank">
-        <img src="https://img.shields.io/packagist/dt/gianmarcopicarella/virgo.svg" alt="Packagist downloads">
     </a>
 </p>
 <br/>

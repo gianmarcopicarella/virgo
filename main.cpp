@@ -8,7 +8,7 @@ int main() {
 
     std::vector<uint32_t> legal_moves = {};
 
-    virgo::Chessboard board = virgo::position_from_fen(INITIAL);
+    virgo::Chessboard board = virgo::position_from_fen("n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1");
     std::cout << board << std::endl;
 
     virgo::get_legal_moves<WHITE>(board, legal_moves);

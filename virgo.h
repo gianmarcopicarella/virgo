@@ -643,6 +643,8 @@ namespace virgo {
         Chessboard board = {};
         memset(board.pieces, 0ull, sizeof(board.pieces));
         board.castling_perm = 0x00;
+        for(int s = a1; s <= h8; s++) board.squares[s] = std::make_pair(EMPTY, BLACK);
+
 
         // take just the board representation
         std::string board_str = fen.substr(0, fen.find(' '));

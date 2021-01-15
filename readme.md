@@ -33,27 +33,27 @@ Virgo
 ## Usage
 Download the repository and include Virgo's header into your source code. In order to include Virgo's implementation correctly, **it is required** to define the macro ```VIRGO_IMPLEMENTATION``` before the ```#include``` directory.
 ```c++
-#define INITIAL "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 #define VIRGO_IMPLEMENTATION
+#define INITIAL "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 #include "virgo.h"
 #include <iostream>
 
 int main() {
     virgo::virgo_init();
-    
+
     std::vector<uint32_t> legal_moves = {};
-    
-    virgo::Chessboard board = virgo::position_from_fen(INITIAL);
+
+    virgo::Chessboard board = virgo::position_from_fen("n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1");
     std::cout << board << std::endl;
-    
+
     virgo::get_legal_moves<WHITE>(board, legal_moves);
-    
+
     for(uint32_t & move : legal_moves) {
         std::cout << virgo::string::move_to_string(move) << std::endl;
     }
-    
+
     std::cout << "total moves: " << legal_moves.size() << std::endl;
-    
+
     return 0;
 }
 ```
@@ -61,10 +61,9 @@ int main() {
 <!-- FUTURE IMPROVEMENTS -->
 ## Future improvements
 
-1. Code a minimal Magic bitboards moves lookup 
-2. Reduce move's size to 16bit
-3. Reduce the search tree by avoiding illegal moves generation by design
-4. Do you have any improvement or feature to add? You are welcome buddy! Please read the contributing section
+* [ ] Code a minimal Magic bitboards moves lookup 
+* [x] Reduce move's size to 16bit
+* [x] Reduce the search tree by avoiding illegal moves generation by design <br/>
 
 <!-- CONTRIBUTING -->
 ## Contributing

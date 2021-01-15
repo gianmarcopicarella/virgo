@@ -29,17 +29,19 @@ SOFTWARE.
 #include <cstdint>
 #include <vector>
 #include <regex>
+#include <iostream>
 
-#define ENCODE_MOVE(from, to, capt, prom, mvt) ((0x00000000u | (from) | ((to) << 6) | ((capt) << 12) | ((prom) << 15) | ((mvt) << 18)))
+#define ENCODE_MOVE(from, to, type) (0x0000u | (from) | ((to) << 6) | ((type) << 12))
 #define MOVE_FROM(move) ((move) & 0x3f)
 #define MOVE_TO(move) (((move) >> 6) & 0x3f)
-#define MOVE_TYPE(move) (((move) >> 18) & 0xf)
-#define MOVE_PROMOTION(move) (((move) >> 15) & 0x7)
-#define MOVE_CAPTURE(move) (((move) >> 12) & 0x7)
+#define MOVE_TYPE(move) (((move) >> 12) & 0xf)
 
 namespace {
     uint64_t KINDERGARTEN[8][256];
     uint64_t KINDERGARTEN_ROTATED[8][256];
+    uint64_t SQUARE_MASK[65];
+    uint64_t FROM_TO_MASK[64][64];
+    uint64_t LINE_MASK[64][64];
 
     const uint64_t DEBRUIJN_MAGIC = 0x03f79d71b4cb0a89ull;
     const uint8_t DEBRUIJN_INDICES[64] = {
@@ -137,6 +139,46 @@ namespace {
             0x44280000000000, 0x0088500000000000, 0x0010a00000000000, 0x20400000000000
     };
 
+    // Look-up table for white pawns
+    const uint64_t WHITE_PAWN_ATTACKS[64] = {
+            0x200, 0x500, 0xa00, 0x1400,
+            0x2800, 0x5000, 0xa000, 0x4000,
+            0x20000, 0x50000, 0xa0000, 0x140000,
+            0x280000, 0x500000, 0xa00000, 0x400000,
+            0x2000000, 0x5000000, 0xa000000, 0x14000000,
+            0x28000000, 0x50000000, 0xa0000000, 0x40000000,
+            0x200000000, 0x500000000, 0xa00000000, 0x1400000000,
+            0x2800000000, 0x5000000000, 0xa000000000, 0x4000000000,
+            0x20000000000, 0x50000000000, 0xa0000000000, 0x140000000000,
+            0x280000000000, 0x500000000000, 0xa00000000000, 0x400000000000,
+            0x2000000000000, 0x5000000000000, 0xa000000000000, 0x14000000000000,
+            0x28000000000000, 0x50000000000000, 0xa0000000000000, 0x40000000000000,
+            0x200000000000000, 0x500000000000000, 0xa00000000000000, 0x1400000000000000,
+            0x2800000000000000, 0x5000000000000000, 0xa000000000000000, 0x4000000000000000,
+            0x0, 0x0, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0,
+    };
+
+    // Look-up table for black pawns
+    const uint64_t BLACK_PAWN_ATTACKS[64] = {
+            0x0, 0x0, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0,
+            0x2, 0x5, 0xa, 0x14,
+            0x28, 0x50, 0xa0, 0x40,
+            0x200, 0x500, 0xa00, 0x1400,
+            0x2800, 0x5000, 0xa000, 0x4000,
+            0x20000, 0x50000, 0xa0000, 0x140000,
+            0x280000, 0x500000, 0xa00000, 0x400000,
+            0x2000000, 0x5000000, 0xa000000, 0x14000000,
+            0x28000000, 0x50000000, 0xa0000000, 0x40000000,
+            0x200000000, 0x500000000, 0xa00000000, 0x1400000000,
+            0x2800000000, 0x5000000000, 0xa000000000, 0x4000000000,
+            0x20000000000, 0x50000000000, 0xa0000000000, 0x140000000000,
+            0x280000000000, 0x500000000000, 0xa00000000000, 0x400000000000,
+            0x2000000000000, 0x5000000000000, 0xa000000000000, 0x14000000000000,
+            0x28000000000000, 0x50000000000000, 0xa0000000000000, 0x40000000000000,
+    };
+
     // Look-up for castling permissions
     const uint8_t CASTLE_PERM[64] = {
             11, 15, 15, 15, 3, 15, 15, 7,
@@ -187,8 +229,8 @@ namespace virgo {
         CAPTURE,
         EN_PASSANT,
         CASTLE,
-        PROMOTION_QUIET,
-        PROMOTION_CAPTURE
+        PQ_R, PQ_B, PQ_Q, PQ_N,
+        PC_R, PC_B, PC_Q, PC_N
     };
 
     enum Direction {
@@ -201,10 +243,11 @@ namespace virgo {
     };
 
     typedef struct HistoryMove {
-        uint32_t move = 0;
-        unsigned int fiftyMove = 0;
+        Piece capture;
+        uint16_t move;
+        unsigned int fifty_mv_counter = 0;
         uint64_t enpassant = INVALID;
-        uint8_t castlingPermissions = 0;
+        uint8_t castling_perm = 0;
     } HistoryMove;
 
     // Class maintaining information about the current board configuration
@@ -238,13 +281,23 @@ namespace virgo {
         }
 
         // It returns the occupancy bitboard
-        inline uint64_t & get_all() {
+        inline uint64_t occupancy() {
             return this->all;
         }
 
         // It returns the next player who has to make the next move
         inline Player get_next_to_move() {
-            return this->next_to_move;
+            return this->next;
+        }
+
+        // It returns true if player P can castle king side otherwise false
+        template <Player P> inline bool can_castle_king_side() {
+            return this->castling_perm & (P == WHITE ? 0x08 : 0x02);
+        }
+
+        // It returns true if player P can castle queen side otherwise false
+        template <Player P> inline bool can_castle_queen_side() {
+            return this->castling_perm & (P == WHITE ? 0x04 : 0x01);
         }
 
     private:
@@ -259,7 +312,7 @@ namespace virgo {
         void move_piece(unsigned int from, unsigned int to);
 
         // Player who has to make the next move
-        Player next_to_move;
+        Player next;
 
         // History move array
         std::vector<HistoryMove> history;
@@ -269,7 +322,7 @@ namespace virgo {
         uint8_t castling_perm;
 
         // Fifty move rule counter (useful to evaluate 50 moves rule)
-        uint8_t fifty_mv_rule;
+        uint8_t fifty_mv_counter;
 
         // Current enpassant square (from 0 to 63, 64 if it isn't set)
         unsigned int enpassant;
@@ -287,8 +340,8 @@ namespace virgo {
         std::pair<Piece, Player> squares[64];
 
         // Friends functions
-        template <Player player> friend void get_legal_moves(Chessboard & board, std::vector<uint32_t> & moves);
-        template <Player player> friend bool make_move(uint32_t move, Chessboard & board);
+        template <Player player> friend void get_legal_moves(Chessboard & board, std::vector<uint16_t> & mvs);
+        template <Player player> friend void make_move(uint16_t move, Chessboard & board);
         template <Player player> friend void take_move(Chessboard & board);
         friend Chessboard position_from_fen(std::string fen);
     };
@@ -393,6 +446,23 @@ namespace {
             }
         }
 
+        // Given a bitboard it returns the number of bits equal to one
+        inline uint8_t hamming_weight(uint64_t bb) {
+            uint8_t count = 0;
+            while(bb && ++count) bb &= (bb-1);
+            return count;
+        }
+
+        // Given a square it returns its main diagonal's index
+        inline uint8_t main_diagonal_index(unsigned int square) {
+            return 7 - (square & 0x7) + (square >> 3);
+        }
+
+        // Given a square it returns its minor diagonal's index
+        inline uint8_t minor_diagonal_index(unsigned int square) {
+            return (square & 0x7) + (square >> 3);
+        }
+
     }
 /////////////////////////////////////////////////////////////////////// BINARY PERMUTATIONS HELPERS ////////////////////////////////////////////////////////////////////
     namespace permutations {
@@ -462,6 +532,11 @@ namespace {
             return pawns_attacks_east<P>(pawnsBB) | pawns_attacks_west<P>(pawnsBB);
         }
 
+        // Given a square it returns the positions from which a pawn could attack if there
+        template<Player P> uint64_t get_pawns_attacks_to(unsigned int square) {
+            return P == BLACK ? WHITE_PAWN_ATTACKS[square] : BLACK_PAWN_ATTACKS[square];
+        }
+
         // Given an occupancy bitboard and a square it returns the corresponding set of diagonal attacks
         inline uint64_t diagonal_attacks(uint64_t occ, unsigned int square) {
             static const uint64_t a_file = 0x0101010101010101;
@@ -493,15 +568,12 @@ namespace {
         }
 
         // Given a player and a board it returns the attacked bitboard
-        template <Player P> uint64_t get_attack_bitboard(virgo::Chessboard & board){
+        template <Player P> uint64_t get_attack_bitboard(uint64_t all_bb, Chessboard & board){
+            uint64_t danger, pieces = board.get_bitboard<P>(PAWN);
 
-            uint64_t pieces = board.get_bitboard<P>(PAWN);
-            uint64_t danger = getPawnsAttacks<P>(pieces) |
-                              KING_ATTACKS[board.king_square<P>()];
+            danger = getPawnsAttacks<P>(pieces) | KING_ATTACKS[board.king_square<P>()];
 
             pieces = board.occupancy<P>() & (~pieces);
-            uint64_t all = board.get_all();
-            uint64_t notEnemyAll = ~board.occupancy<P>();
 
             while(pieces) {
                 unsigned int square = bit::pop_lsb_index(pieces);
@@ -510,13 +582,13 @@ namespace {
                         danger |= KNIGHT_ATTACKS[square];
                         break;
                     case ROOK:
-                        danger |= orthogonal_attacks(all, square) & notEnemyAll;
+                        danger |= orthogonal_attacks(all_bb, square);
                         break;
                     case BISHOP:
-                        danger |= diagonal_attacks(all, square) & notEnemyAll;
+                        danger |= diagonal_attacks(all_bb, square);
                         break;
                     case QUEEN:
-                        danger |= (diagonal_attacks(all, square) | orthogonal_attacks(all, square)) & notEnemyAll;
+                        danger |= (diagonal_attacks(all_bb, square) | orthogonal_attacks(all_bb, square));
                         break;
                 }
                 pieces &= (pieces-1);
@@ -531,9 +603,9 @@ namespace virgo {
     // Default constructor which initializes to the initial chess configuration
     Chessboard::Chessboard() {
         // Initial chessboard setup
-        this->castling_perm = 0x0f;
-        this->fifty_mv_rule = 0;
-        this->next_to_move = WHITE;
+        this->castling_perm = 0x00;
+        this->fifty_mv_counter = 0;
+        this->next = WHITE;
         this->enpassant = INVALID;
         this->king_position[0] = e8;
         this->king_position[1] = e1;
@@ -581,8 +653,8 @@ namespace virgo {
     Chessboard::Chessboard(Chessboard const &c) {
         this->all = c.all;
         this->castling_perm = c.castling_perm;
-        this->fifty_mv_rule = c.fifty_mv_rule;
-        this->next_to_move = c.next_to_move;
+        this->fifty_mv_counter = c.fifty_mv_counter;
+        this->next = c.next;
         this->enpassant = c.enpassant;
 
         memcpy(this->pieces, c.pieces, 12*sizeof(uint64_t));
@@ -701,7 +773,7 @@ namespace virgo {
         std::regex_match(rest, match, expr);
 
         // Set next player to move
-        board.next_to_move = match.str(1) == "w" ? WHITE : BLACK;
+        board.next = match.str(1) == "w" ? WHITE : BLACK;
 
         // Set castling permissions
         std::string castlingPermissions = match.str(2);
@@ -732,34 +804,34 @@ namespace virgo {
         }
 
         // Fifty move rule counter
-        board.fifty_mv_rule = std::stoi(match.str(4));
+        board.fifty_mv_counter = std::stoi(match.str(4));
 
         return board;
     }
 
     // Given a player and a chessboard it reverts the last move made
     template <Player player> void take_move(Chessboard & board){
-        const static int pawnOffsets[2][3] = { {9, 7, 8}, {-7, -9, -8} };
-        const static uint8_t castlingMask[2] = {0x0c, 0x03};
+        static const int8_t EP_OFFSET[2] = { 8, -8 };
 
-        board.ply--;
-
-        HistoryMove move = board.history.back();
+        // Get the last move made and remove it from the history
+        HistoryMove last = board.history.back();
         board.history.pop_back();
 
-        unsigned int from = MOVE_FROM(move.move);
-        unsigned int to = MOVE_TO(move.move);
+        // Get the from and to square
+        unsigned int from = MOVE_FROM(last.move),
+                to = MOVE_TO(last.move);
 
-        board.next_to_move = player;
-        constexpr Player enemy = static_cast<const Player>(player ^ 1);
+        // Revert the board status
+        board.next = player;
+        board.castling_perm = last.castling_perm;
+        board.fifty_mv_counter = last.fifty_mv_counter;
+        board.enpassant = last.enpassant;
+        board.ply--;
 
-        board.castling_perm = move.castlingPermissions;
-        board.fifty_mv_rule = move.fiftyMove;
-        board.enpassant = move.enpassant;
-
-        switch (MOVE_TYPE(move.move)) {
+        // Revert the move based on what type it is
+        switch (MOVE_TYPE(last.move)) {
             case EN_PASSANT:
-                board.add_piece(enemy, PAWN, to + pawnOffsets[player][2]);
+                board.add_piece(static_cast<Player>(player ^ 1), PAWN, to + EP_OFFSET[player]);
                 board.move_piece(to, from);
                 break;
             case CASTLE:
@@ -781,66 +853,72 @@ namespace virgo {
                 break;
             case CAPTURE:
                 board.move_piece(to, from);
-                board.add_piece(enemy, static_cast<Piece>(MOVE_CAPTURE(move.move)), to);
+                board.add_piece(static_cast<Player>(player ^ 1), last.capture, to);
                 break;
-            case PROMOTION_QUIET:
+            case PQ_B:
+            case PQ_R:
+            case PQ_N:
+            case PQ_Q:
                 board.clear_piece(to);
                 board.add_piece(player, PAWN, from);
                 break;
-            case PROMOTION_CAPTURE:
+            case PC_B:
+            case PC_R:
+            case PC_N:
+            case PC_Q:
                 board.clear_piece(to);
-                board.add_piece(enemy, static_cast<Piece>(MOVE_CAPTURE(move.move)), to);
+                board.add_piece(static_cast<Player>(player ^ 1), last.capture, to);
                 board.add_piece(player, PAWN, from);
                 break;
             default:
                 board.move_piece(to, from);
         }
     }
+
     // Given a player, a move and a chessboard it makes the move
-    template <Player player> bool make_move(uint32_t move, Chessboard & board) {
-        const static int pawnOffsets[2][3] = { {9, 7, 8}, {-7, -9, -8} };
-        const static uint8_t castlingMask[2] = {0x0c, 0x03};
+    template <Player player> void make_move(uint16_t move, Chessboard & board) {
+        static const int8_t EP_OFFSET[2] = { 8, -8 };
 
-        unsigned int from = MOVE_FROM(move);
-        unsigned int to = MOVE_TO(move);
-        constexpr Player enemy = static_cast<const Player>(player ^ 1);
+        // Get the from and to square
+        unsigned int from = MOVE_FROM(move),
+                to = MOVE_TO(move);
 
-        board.ply++;
+        // Add the move and a set of board's variables which must be tracked
+        board.history.push_back({board[to].first, move, board.fifty_mv_counter, board.enpassant, board.castling_perm});
 
-        // add to history
-        board.history.push_back({move, board.fifty_mv_rule, board.enpassant, board.castling_perm});
-        // set enpassant to invalid
+        // Set the en-passant square to null
         board.enpassant = INVALID;
 
+        // Make the move based on what type it is
         switch (MOVE_TYPE(move)) {
             case PAWN_QUIET:
-                board.fifty_mv_rule = 0;
+                board.fifty_mv_counter = 0;
                 board.move_piece(from, to);
                 break;
             case PAWN_DOUBLE:
-                board.fifty_mv_rule = 0;
-                board.enpassant = from + pawnOffsets[enemy][2];
+                board.fifty_mv_counter = 0;
+                board.enpassant = to + EP_OFFSET[player];
                 board.move_piece(from, to); // move pawn
                 break;
             case EN_PASSANT:
-                board.fifty_mv_rule = 0;
-                board.clear_piece(to + pawnOffsets[player][2]);
+                board.fifty_mv_counter = 0;
+                board.clear_piece(to + EP_OFFSET[player]);
                 board.move_piece(from, to); // move pawn
                 break;
             case QUIET:
                 board.castling_perm &= CASTLE_PERM[from] & CASTLE_PERM[to];
-                board.fifty_mv_rule++;
+                board.fifty_mv_counter++;
                 board.move_piece(from, to);
                 break;
             case CAPTURE:
                 board.castling_perm &= CASTLE_PERM[from] & CASTLE_PERM[to];
-                board.fifty_mv_rule = 0;
+                board.fifty_mv_counter = 0;
                 board.clear_piece(to);
                 board.move_piece(from, to);
                 break;
             case CASTLE:
                 board.castling_perm &= CASTLE_PERM[from] & CASTLE_PERM[to];
-                board.fifty_mv_rule++;
+                board.fifty_mv_counter++;
                 switch (to) {
                     case c1:
                         board.move_piece(a1, d1);
@@ -857,353 +935,491 @@ namespace virgo {
                 }
                 board.move_piece(from, to);
                 break;
-            case PROMOTION_QUIET:
+            case PQ_B:
                 board.castling_perm &= CASTLE_PERM[from] & CASTLE_PERM[to];
-                board.fifty_mv_rule = 0;
+                board.fifty_mv_counter = 0;
                 board.clear_piece(from);
-                board.add_piece(player, static_cast<Piece>(MOVE_PROMOTION(move)), to);
+                board.add_piece(player, BISHOP, to);
                 break;
-            case PROMOTION_CAPTURE:
+            case PQ_N:
                 board.castling_perm &= CASTLE_PERM[from] & CASTLE_PERM[to];
-                board.fifty_mv_rule = 0;
+                board.fifty_mv_counter = 0;
+                board.clear_piece(from);
+                board.add_piece(player, KNIGHT, to);
+                break;
+            case PQ_R:
+                board.castling_perm &= CASTLE_PERM[from] & CASTLE_PERM[to];
+                board.fifty_mv_counter = 0;
+                board.clear_piece(from);
+                board.add_piece(player, ROOK, to);
+                break;
+            case PQ_Q:
+                board.castling_perm &= CASTLE_PERM[from] & CASTLE_PERM[to];
+                board.fifty_mv_counter = 0;
+                board.clear_piece(from);
+                board.add_piece(player, QUEEN, to);
+                break;
+            case PC_B:
+                board.castling_perm &= CASTLE_PERM[from] & CASTLE_PERM[to];
+                board.fifty_mv_counter = 0;
                 board.clear_piece(to);
                 board.clear_piece(from);
-                board.add_piece(player, static_cast<Piece>(MOVE_PROMOTION(move)), to);
+                board.add_piece(player, BISHOP, to);
+                break;
+            case PC_R:
+                board.castling_perm &= CASTLE_PERM[from] & CASTLE_PERM[to];
+                board.fifty_mv_counter = 0;
+                board.clear_piece(to);
+                board.clear_piece(from);
+                board.add_piece(player, ROOK, to);
+                break;
+            case PC_Q:
+                board.castling_perm &= CASTLE_PERM[from] & CASTLE_PERM[to];
+                board.fifty_mv_counter = 0;
+                board.clear_piece(to);
+                board.clear_piece(from);
+                board.add_piece(player, QUEEN, to);
+                break;
+            case PC_N:
+                board.castling_perm &= CASTLE_PERM[from] & CASTLE_PERM[to];
+                board.fifty_mv_counter = 0;
+                board.clear_piece(to);
+                board.clear_piece(from);
+                board.add_piece(player, KNIGHT, to);
                 break;
         }
 
-        board.next_to_move = enemy;
-
-        if(moves::get_attack_bitboard<enemy>(board) & board.get_bitboard<player>(KING)) {
-            take_move<player>(board);
-            return false;
-        }
-        return true;
-
+        // Set the next player to move and increase the ply
+        board.next = static_cast<Player>(player ^ 1);
+        board.ply++;
     }
 
     // Given a player, a chessboard and a list of moves it fills the list with every legal move possible
-    template <Player player> void get_legal_moves(Chessboard & board, std::vector<uint32_t> & moves) {
-        const static Square SPECIAL_RANK[2] = {a2, a7};
-        const static int OFFSET[2][4] = {{-8,-7,-9,-16}, {8,9,7,16}};
-        const static uint64_t PAWN_MAKS[2] = {0xffffffffffff0000, 0x0000ffffffffffff};
-        static const uint8_t permissionsMask[2][2] = {{0x01, 0x02}, {0x04, 0x08}};
-        static const uint64_t emptyMask[2][2] = {
+    template <Player player> void get_legal_moves(Chessboard & board, std::vector<uint16_t> & mvs) {
+        const static int8_t OFFSET[2][4] = {{-8,-7,-9,-16}, {8,9,7,16}};
+        static const uint64_t PAWN_SPECIAL_RANK_MASK[2] = {0x00ff000000000000, 0x000000000000ff00};
+        static const uint64_t CASTLING_ATTACK_MASK[2] = { 0x0c00000000000000, 0x000000000000000c };
+        static const uint64_t CASTLING_EMPTY_MASK[2][2] = {
                 {0x0e00000000000000, 0x000000000000000e},
                 {0x6000000000000000, 0x0000000000000060}
         };
 
-        // Define actual player and enemy
+        // Define enemy player and some temporary variables
         constexpr Player enemy = static_cast<const Player>(player ^ 1);
+        uint64_t b1, b2, b3, b4;
 
-        // Define some temporary variables
-        uint64_t sr, r1, r2, r3, squares;
-        int square;
+        // Find player's king square position
+        unsigned int player_king_square = board.king_square<player>();
 
-        uint64_t all_bb = board.get_all();
-        uint64_t enemy_all_bb = board.occupancy<enemy>();
+        // Define the occupancy bitboards for each player and its union
+        uint64_t all_bb = board.occupancy();
+        uint64_t enemy_bb = board.occupancy<enemy>();
+        uint64_t player_bb = board.occupancy<player>();
+
+        // Find pawns and knights player's bitboards
         uint64_t player_pawns_bb = board.get_bitboard<player>(PAWN);
+        uint64_t player_knights_bb = board.get_bitboard<player>(KNIGHT);
 
-        // 1) Generates pawn's double moves
+        // Find orthogonal and diagonal pieces bitboards
+        uint64_t enemy_queen_bb = board.get_bitboard<enemy>(QUEEN);
+        uint64_t enemy_orth_bb = board.get_bitboard<enemy>(ROOK) | enemy_queen_bb;
+        uint64_t enemy_diag_bb = board.get_bitboard<enemy>(BISHOP) | enemy_queen_bb;
 
-        // According to the player's color it finds the special rank for double moves
-        sr = (player_pawns_bb >> (48 - 40*player)) & 0xff;
+        uint64_t player_queen_bb = board.get_bitboard<player>(QUEEN);
+        uint64_t player_orth_bb = board.get_bitboard<player>(ROOK) | player_queen_bb;
+        uint64_t player_diag_bb = board.get_bitboard<player>(BISHOP) | player_queen_bb;
 
-        // Then takes the 2 next ranks based on the player's color
-        r1 = all_bb >> (40 - 24*player);
-        r2 = all_bb >> (32 - 8*player);
+        // Add enemy pawns and knights which check the player's king
+        uint64_t checkers = (KNIGHT_ATTACKS[player_king_square] & board.get_bitboard<enemy>(KNIGHT)) |
+                            (moves::get_pawns_attacks_to<enemy>(player_king_square) & board.get_bitboard<enemy>(PAWN));
 
-        // And find every square reachable with a double move
-        // if there are no pieces in the file from ax+1 to ax+2 and there is a pawn on ax then it is a double move
-        squares = (~(r1 | r2) & sr) << SPECIAL_RANK[enemy];
+        // Find enemy sliding pieces aligned with the player's king
+        b1 = ((moves::orthogonal_attacks(enemy_bb, player_king_square)) & enemy_orth_bb) |
+             ((moves::diagonal_attacks(enemy_bb, player_king_square)) & enemy_diag_bb);
 
-        // Iterate through the possible squares adding at each iteration a new move
-        while(squares) {
-            square = bit::pop_lsb_index(squares); // Get the LSB Index
-            moves.push_back(ENCODE_MOVE(square, square + OFFSET[player][3], EMPTY, EMPTY, PAWN_DOUBLE));
-            squares &= (squares-1); // Set LSB to 0
+        // Initialize the pinned bitboard
+        uint64_t pinned = 0ull;
+
+        // Remove the player's king to avoid problems with FROM_TO_MASK at **
+        player_bb ^= SQUARE_MASK[player_king_square];
+
+        // Iterate through every enemy slider piece aligned with the player's king
+        while(b1) {
+            // take the enemy sliding piece position
+            unsigned int sliding_piece_square = bit::pop_lsb_index(b1);
+
+            // take every piece between the range
+            b2 = FROM_TO_MASK[player_king_square][sliding_piece_square] & player_bb;
+
+            // if there are no pieces it is a checker
+            if(b2 == 0) {
+                checkers |= SQUARE_MASK[sliding_piece_square];
+            }
+                // otherwise if there is just one player's piece it is an absolutely pinned piece
+            else if ((b2 & (b2-1)) == 0) {
+                pinned |= b2;
+            }
+            b1 &= (b1-1);
         }
 
-        // 1) End
+        // Find not-pinned pieces
+        uint64_t not_pinned = (~pinned);
 
-        // 2) Generates pawn's quiet and attack promotions
-        // It isolates the second or seventh rank based on player's color
-        // Then it overlaps the forward rank shifted accordingly
-        // Example
+        // Add back the player's king
+        player_bb ^= SQUARE_MASK[player_king_square];
+
+        // get attacked squares by enemy pieces (without & not_enemy_pieces (it would make the program crash with some tests))
         /*
-         * b#r##### -> { Quiet mask: 10100000, Left attack mask: 01010000, Right attack mask: 01000000 }
-         * #P###### ->
-         *
+         * P - -
+         * - k -
+         * - - B
+         * in this case if we had done an and operation with not_enemy_pieces we would have got
+         * 0 - -
+         * - 1 -
+         * - - 1
+         * giving the possibility for the king to move safe to the pawn position when actually it isn't safe
          */
+        uint64_t attacked_bb = moves::get_attack_bitboard<enemy>(all_bb ^ SQUARE_MASK[player_king_square], board);
+        b1 = attacked_bb;
 
-        if(player) {
-            sr = player_pawns_bb & 0x00ff000000000000;
-            r1 = all_bb >> 8;
-            r2 = enemy_all_bb >> 9; // sx
-            r3 = (enemy_all_bb >> 7) & 0xfefefefefefefefe; // dx
+        // find squares which are not under attack and leave the king out of check
+        b2 = KING_ATTACKS[player_king_square] & (~b1);
+
+        // Iterate through every possible quiet move square adding at each iteration a new move
+        b3 = b2 & (~all_bb);
+        while(b3) {
+            mvs.push_back(ENCODE_MOVE(player_king_square, bit::pop_lsb_index(b3), QUIET));
+            b3 &= (b3-1);
         }
+
+        // Iterate through every possible attack move square adding at each iteration a new move
+        b3 = b2 & (enemy_bb ^ board.get_bitboard<enemy>(KING));
+        while(b3) {
+            mvs.push_back(ENCODE_MOVE(player_king_square, bit::pop_lsb_index(b3), CAPTURE));
+            b3 &= (b3-1);
+        }
+
+        // find the number of enemy pieces checking player's king
+        unsigned int checkers_count = bit::hamming_weight(checkers);
+
+        // If there are 2 checkers then return
+        if(checkers_count > 1) return;
+        // If there is one checker then capture or, if sliding piece, block its ray
+        else if(checkers_count == 1) {
+
+            // Find the square where the checking piece lies on and its type
+            unsigned int checking_piece_square = bit::pop_lsb_index(checkers);
+            Piece checker_piece = board[checking_piece_square].first;
+
+            // If the checker has just double moved
+            if(checker_piece == PAWN &&
+               checkers == moves::pawns_forward<enemy>(SQUARE_MASK[board.enpassant])) {
+                // Find all the pawns which aren't pinned and can attack the checker enpassant square
+                b1 = moves::get_pawns_attacks_to<player>(board.enpassant) & player_pawns_bb & not_pinned;
+                while(b1) {
+                    mvs.push_back(ENCODE_MOVE(bit::pop_lsb_index(b1), board.enpassant, EN_PASSANT));
+                    b1 &= (b1-1);
+                }
+            }
+
+            // Find every player's piece which can attack the enemy checker
+            b1 = moves::orthogonal_attacks(all_bb, checking_piece_square) & player_orth_bb & not_pinned;
+            b1 |= moves::diagonal_attacks(all_bb, checking_piece_square) & player_diag_bb & not_pinned;
+            b1 |= KNIGHT_ATTACKS[checking_piece_square] & player_knights_bb & not_pinned;
+
+            b2 = moves::get_pawns_attacks_to<player>(checking_piece_square) & player_pawns_bb & not_pinned;
+
+            // Find pawns which can attack with a promotion
+            b3 = b2 & PAWN_SPECIAL_RANK_MASK[enemy];
+
+            int square;
+
+            // Add pawn's promotions attacks
+            while(b3) {
+                square = bit::pop_lsb_index(b3);
+                mvs.push_back(ENCODE_MOVE(square, checking_piece_square, PC_B));
+                mvs.push_back(ENCODE_MOVE(square, checking_piece_square, PC_R));
+                mvs.push_back(ENCODE_MOVE(square, checking_piece_square, PC_N));
+                mvs.push_back(ENCODE_MOVE(square, checking_piece_square, PC_Q));
+                b3 &= (b3-1);
+            }
+
+            // Add pawns which can't be promoted but can still attack the checker
+            b1 |= b2 & (~PAWN_SPECIAL_RANK_MASK[enemy]);
+
+            // Add mixed pieces attack moves
+            while(b1) {
+                mvs.push_back(ENCODE_MOVE(bit::pop_lsb_index(b1), checking_piece_square, CAPTURE));
+                b1 &= (b1-1);
+            }
+
+            // If the checker is a knight or pawn then return
+            if(checker_piece == KNIGHT || checker_piece == PAWN) return;
+
+            // Get the line between the king and the checker
+            b1 = FROM_TO_MASK[player_king_square][checking_piece_square] ^
+                 SQUARE_MASK[player_king_square] ^
+                 SQUARE_MASK[checking_piece_square];
+
+            // Copy the line
+            b2 = b1;
+
+            // Iterate through every line's square and add every move which can place a piece on to that
+            while(b2) {
+                square = bit::pop_lsb_index(b2);
+                b3 = KNIGHT_ATTACKS[square] & player_knights_bb;
+                b3 |= moves::orthogonal_attacks(all_bb, square) & player_orth_bb;
+                b3 |= moves::diagonal_attacks(all_bb, square) & player_diag_bb;
+                b3 &= ~pinned;
+                while(b3) {
+                    mvs.push_back(ENCODE_MOVE(bit::pop_lsb_index(b3), square, QUIET));
+                    b3 &= (b3-1);
+                }
+                b2 &= (b2-1);
+            }
+
+            // Find single move pawns which fill the line
+            b2 = moves::pawns_forward<player>(player_pawns_bb & not_pinned) & b1;
+
+            while(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square + OFFSET[enemy][0], square, PAWN_QUIET));
+                b2 &= (b2-1);
+            }
+
+            // Find double move pawns which fill the line
+            b2 = player_pawns_bb & PAWN_SPECIAL_RANK_MASK[player] & not_pinned;
+
+            if(player == WHITE) b2 = (((b2 << 8) & ~all_bb) << 8) & ~all_bb & b1;
+            else b2 = (((b2 >> 8) & ~all_bb) >> 8) & ~all_bb & b1;
+
+            while(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square + OFFSET[enemy][3], square, PAWN_DOUBLE));
+                b2 &= (b2-1);
+            }
+        }
+        // If there is no check
         else {
-            sr = player_pawns_bb & 0xff00;
-            r1 = all_bb << 8;
-            r2 = (enemy_all_bb << 7) & 0x7f7f7f7f7f7f7f7f; // se
-            r3 = enemy_all_bb << 9; // sw
-        }
+            unsigned int square;
 
-        // Iterate through every quiet promotion adding a new move
-        squares = sr & (~r1);
-        while(squares) {
-            square = bit::pop_lsb_index(squares);
-            int to = square + OFFSET[player][0];
-            moves.push_back(ENCODE_MOVE(square, to, EMPTY, ROOK, PROMOTION_QUIET));
-            moves.push_back(ENCODE_MOVE(square, to, EMPTY, BISHOP, PROMOTION_QUIET));
-            moves.push_back(ENCODE_MOVE(square, to, EMPTY, KNIGHT, PROMOTION_QUIET));
-            moves.push_back(ENCODE_MOVE(square, to, EMPTY, QUEEN, PROMOTION_QUIET));
-            squares &= (squares-1);
-        }
-
-        // Iterate through every left attack promotion adding a new move
-        squares = sr & r2;
-        while(squares) {
-            square = bit::pop_lsb_index(squares);
-            int to = square + OFFSET[player][1];
-            moves.push_back(ENCODE_MOVE(square, to, board[to].first, ROOK, PROMOTION_CAPTURE));
-            moves.push_back(ENCODE_MOVE(square, to, board[to].first, BISHOP, PROMOTION_CAPTURE));
-            moves.push_back(ENCODE_MOVE(square, to, board[to].first, KNIGHT, PROMOTION_CAPTURE));
-            moves.push_back(ENCODE_MOVE(square, to, board[to].first, QUEEN, PROMOTION_CAPTURE));
-            squares &= (squares-1);
-        }
-
-        // Iterate through every right attack promotion adding a new move
-        squares = sr & r3;
-        while(squares) {
-            square = bit::pop_lsb_index(squares);
-            int to = square + OFFSET[player][2];
-            moves.push_back(ENCODE_MOVE(square, to, board[to].first, ROOK, PROMOTION_CAPTURE));
-            moves.push_back(ENCODE_MOVE(square, to, board[to].first, BISHOP, PROMOTION_CAPTURE));
-            moves.push_back(ENCODE_MOVE(square, to, board[to].first, KNIGHT, PROMOTION_CAPTURE));
-            moves.push_back(ENCODE_MOVE(square, to, board[to].first, QUEEN, PROMOTION_CAPTURE));
-            squares &= (squares-1);
-        }
-
-        // 2) End pawn promotion generation
-
-        // Remove promoted pawns as they have every move already generated
-        player_pawns_bb &= PAWN_MAKS[player];
-
-        // 3) Generates pawn's single moves
-
-        // According to his color, shift player's pawns bitboard north/south
-        squares = moves::pawns_forward<player>(player_pawns_bb) & ~all_bb;
-
-        // Iterate through the possible squares adding at each iteration a new move
-        while(squares) {
-            square = bit::pop_lsb_index(squares);
-            moves.push_back(ENCODE_MOVE(square - OFFSET[player][0], square, EMPTY, EMPTY, PAWN_QUIET));
-            squares &= (squares-1);
-        }
-        // 3) End
-
-
-
-        // 4) Generates pawn's left and right enpassant attacks
-        r1 = moves::pawns_attacks_east<player>(player_pawns_bb);
-        r2 = moves::pawns_attacks_west<player>(player_pawns_bb);
-
-        uint64_t enpassantMask = 1ull << board.enpassant;
-
-        // Just to avoid 2 more and operations when enpassantBitboard == 0 or enpassant == INVALID == 64
-        if(enpassantMask & r1) {
-            moves.push_back(ENCODE_MOVE(board.enpassant + OFFSET[enemy][1], board.enpassant, EMPTY, EMPTY, EN_PASSANT));
-        }
-        if(enpassantMask & r2) {
-            moves.push_back(ENCODE_MOVE(board.enpassant + OFFSET[enemy][2], board.enpassant, EMPTY, EMPTY, EN_PASSANT));
-        }
-
-        // 4) End
-
-        // 5) Generates pawn's left and right attacks
-
-        // According to his color, get east and west attack bitboards
-        r1 &= enemy_all_bb;
-        r2 &= enemy_all_bb;
-
-        // Iterate through them adding at each iteration a new attack move
-        while(r1) {
-            square = bit::pop_lsb_index(r1);
-            moves.push_back(ENCODE_MOVE(square - OFFSET[player][2], square, board[square].first, EMPTY, CAPTURE));
-            r1 &= (r1-1);
-        }
-        while(r2) {
-            square = bit::pop_lsb_index(r2);
-            moves.push_back(ENCODE_MOVE(square - OFFSET[player][1], square, board[square].first, EMPTY, CAPTURE));
-            r2 &= (r2-1);
-        }
-        // 5) End Pawn generation
-
-        // Generates king's attacks and quiet moves
-        // Define a square counter and two temporary variables
-
-        int playerKingSquare = board.king_square<player>();
-
-        // Lookup reachable squares bitboard for the given king position
-        r1 = KING_ATTACKS[playerKingSquare];
-        // A king can make a quiet move if no piece lies on the respective square
-        squares = r1 & (~all_bb);
-        // Iterate through the possible squares adding at each iteration a new move
-        while(squares) {
-            square = bit::pop_lsb_index(squares);
-            moves.push_back(ENCODE_MOVE(playerKingSquare, square, EMPTY, EMPTY, QUIET));
-            squares &= (squares-1);
-        }
-        // A king can attack if an enemy piece lies on the respective square
-        squares = r1 & enemy_all_bb;
-        // Iterate through the possible squares adding at each iteration a new move
-        while(squares) {
-            square = bit::pop_lsb_index(squares);
-            moves.push_back(ENCODE_MOVE(playerKingSquare, square, board[square].first, EMPTY, CAPTURE));
-            squares &= (squares-1);
-        }
-        // End
-
-        // Generates knights' attacks and quiet moves
-        int arriveSquare;
-        squares = board.get_bitboard<player>(KNIGHT);
-        // Iterate through available player's knights
-        while(squares) {
-            // Get the starting square and lookup for the respective knight bitboard
-            square = bit::pop_lsb_index(squares);
-            r1 = KNIGHT_ATTACKS[square];
-            // A knight can make a quiet move if no piece lies on the respective square
-            r2 = r1 & (~all_bb);
-            // Iterate through the possible squares adding at each iteration a new move
-            while(r2) {
-                arriveSquare = bit::pop_lsb_index(r2);
-                moves.push_back(ENCODE_MOVE(square, arriveSquare, EMPTY, EMPTY, QUIET));
-                r2 &= (r2-1);
+            // Check if the player can castle queen side
+            if(board.can_castle_queen_side<player>() && !(CASTLING_EMPTY_MASK[0][player] & all_bb) && !(attacked_bb & CASTLING_ATTACK_MASK[player])) {
+                mvs.push_back(player == WHITE ? ENCODE_MOVE(e1, c1, CASTLE) : ENCODE_MOVE(e8, c8, CASTLE));
             }
-            // A knight can attack if an enemy piece lies on the respective square
-            r2 = r1 & enemy_all_bb;
-            // Iterate through the possible squares adding at each iteration a new move
-            while(r2) {
-                arriveSquare = bit::pop_lsb_index(r2);
-                moves.push_back(ENCODE_MOVE(square, arriveSquare, board[arriveSquare].first, EMPTY, CAPTURE));
-                r2 &= (r2-1);
-            }
-            squares &= (squares-1);
-        }
-        // End
 
-        // Generates Bishops quiet and attack moves
-        squares = board.get_bitboard<player>(BISHOP);
-        // Iterate through available player's bishops
-        while(squares) {
-            // Get the starting square and find the respective bishop bitboard
-            square = bit::pop_lsb_index(squares);
-            r1 = moves::diagonal_attacks(all_bb, square);
-            // A bishop can make a quiet move if no piece lies on the respective square
-            r2 = r1 & ~all_bb;
-            // Iterate through the possible squares adding at each iteration a new move
-            while(r2) {
-                arriveSquare = bit::pop_lsb_index(r2);
-                moves.push_back(ENCODE_MOVE(square, arriveSquare, EMPTY, EMPTY, QUIET));
-                r2 &= (r2-1);
+            // Check if the player can castle king side
+            if(board.can_castle_king_side<player>() && !(CASTLING_EMPTY_MASK[1][player] & (all_bb|attacked_bb))) {
+                mvs.push_back(player == WHITE ? ENCODE_MOVE(e1, g1, CASTLE) : ENCODE_MOVE(e8, g8, CASTLE));
             }
-            // A bishop can make an attack move if an enemy piece lies on the respective square
-            r2 = r1 & enemy_all_bb;
-            // Iterate through the possible squares adding at each iteration a new move
-            while(r2) {
-                arriveSquare = bit::pop_lsb_index(r2);
-                moves.push_back(ENCODE_MOVE(square, arriveSquare, board[arriveSquare].first, EMPTY, CAPTURE));
-                r2 &= (r2-1);
-            }
-            squares &= (squares-1);
-        }
-        // End
 
-        // Generates Rooks quiet and attack moves
-        // Define some supporting variables
-        squares = board.get_bitboard<player>(ROOK);
-        // Iterate through available player's rook
-        while(squares) {
-            // Get the starting square and find the respective rook bitboard
-            square = bit::pop_lsb_index(squares);
-            r1 = moves::orthogonal_attacks(all_bb, square);
-            // A rook can make a quiet move if no piece lies on the respective square
-            r2 = r1 & ~all_bb;
-            // Iterate through the possible squares adding at each iteration a new move
-            while(r2) {
-                arriveSquare = bit::pop_lsb_index(r2);
-                moves.push_back(ENCODE_MOVE(square, arriveSquare, EMPTY, EMPTY, QUIET));
-                r2 &= (r2-1);
-            }
-            // A rook can make an attack move if an enemy piece lies on the respective square
-            r2 = r1 & enemy_all_bb;
-            // Iterate through the possible squares adding at each iteration a new move
-            while(r2) {
-                arriveSquare = bit::pop_lsb_index(r2);
-                moves.push_back(ENCODE_MOVE(square, arriveSquare, board[arriveSquare].first, EMPTY, CAPTURE));
-                r2 &= (r2-1);
-            }
-            squares &= (squares-1);
-        }
-        // End
+            // If the en-passant is set then check if the player can capture the piece
+            if(board.enpassant != INVALID) {
+                // Pinned pawns first
+                b1 = moves::get_pawns_attacks_to<player>(board.enpassant) & player_pawns_bb;
+                b2 = b1 & pinned & LINE_MASK[board.enpassant][player_king_square];
+                if(b2) mvs.push_back(ENCODE_MOVE(bit::pop_lsb_index(b2), board.enpassant, EN_PASSANT));
 
-        // Generates Queens quiet and attack moves
-        // Define some supporting variables
-        squares = board.get_bitboard<player>(QUEEN);
-        // Iterate through available player's queens
-        while(squares) {
-            // Get the starting square and find the respective queen bitboard
-            square = bit::pop_lsb_index(squares);
-            r1 = moves::orthogonal_attacks(all_bb, square) | moves::diagonal_attacks(all_bb, square);
-            // A queen can make a quiet move if no piece lies on the respective square
-            r2 = r1 & ~all_bb;
-            // Iterate through the possible squares adding at each iteration a new move
-            while(r2) {
-                arriveSquare = bit::pop_lsb_index(r2);
-                moves.push_back(ENCODE_MOVE(square, arriveSquare, EMPTY, EMPTY, QUIET));
-                r2 &= (r2-1);
-            }
-            // A queen can make an attack move if an enemy piece lies on the respective square
-            r2 = r1 & enemy_all_bb;
-            // Iterate through the possible squares adding at each iteration a new move
-            while(r2) {
-                arriveSquare = bit::pop_lsb_index(r2);
-                moves.push_back(ENCODE_MOVE(square, arriveSquare, board[arriveSquare].first, EMPTY, CAPTURE));
-                r2 &= (r2-1);
-            }
-            squares &= (squares-1);
-        }
-        // End
+                // Not pinned pawns then
+                b2 = b1 & not_pinned;
+                // Find the piece bitboard mask
+                b3 = SQUARE_MASK[board.enpassant + OFFSET[enemy][0]];
 
-        bool queenSide = (board.castling_perm & permissionsMask[player][0]) && !(emptyMask[0][player] & all_bb);
-        bool kingSide  = (board.castling_perm & permissionsMask[player][1]) && !(emptyMask[1][player] & all_bb);
-
-        uint64_t enemyAttacks = (queenSide || kingSide) ? moves::get_attack_bitboard<enemy>(board) : 0;
-
-        // Queen side castling
-        if(queenSide) {
-            if(!(enemyAttacks & ((1ull << (e8 - 56 * player)) | (1ull << (d8 - 56 * player))))) {
-                moves.push_back(ENCODE_MOVE(e8 - 56*player, c8 - 56*player, EMPTY, EMPTY, CASTLE));
+                while(b2) {
+                    square = bit::pop_lsb_index(b2);
+                    if(!(HORIZONTAL_MASK[player_king_square] &
+                       moves::orthogonal_attacks(all_bb ^ SQUARE_MASK[square] ^ b3, player_king_square) & enemy_orth_bb)) {
+                        mvs.push_back(ENCODE_MOVE(bit::pop_lsb_index(b2), board.enpassant, EN_PASSANT));
+                    }
+                    b2 &= (b2-1);
+                }
             }
-        }
 
-        // King side castling
-        if(kingSide) {
-            if(!(enemyAttacks & ((1ull << (e8 - 56 * player)) | (1ull << (f8 - 56 * player))))) {
-                moves.push_back(ENCODE_MOVE(e8 - 56*player, g8 - 56*player, EMPTY, EMPTY, CASTLE));
-            }
-        }
+            // Find pinned rooks and queens
+            b1 = (player_orth_bb | player_diag_bb) & pinned;
 
-        // Remove invalid moves
-        auto it = moves.begin();
-        while(it != moves.end()) {
-            if(!make_move<player>(*it, board)) {
-                it = moves.erase(it);
-                continue;
+            // Add every quiet or attack move which is aligned with the king from pinned pieces
+            while(b1) {
+                square = bit::pop_lsb_index(b1);
+                if(board[square].first == BISHOP) b2 = moves::diagonal_attacks(all_bb, square);
+                else if(board[square].first == ROOK) b2 = moves::orthogonal_attacks(all_bb, square);
+                else b2 = moves::diagonal_attacks(all_bb, square) | moves::orthogonal_attacks(all_bb, square);
+                b2 &= LINE_MASK[square][player_king_square];
+                b3 = b2 & (~all_bb);
+                while(b3) {
+                    mvs.push_back(ENCODE_MOVE(square, bit::pop_lsb_index(b3), QUIET));
+                    b3 &= (b3-1);
+                }
+                b3 = b2 & enemy_bb;
+                while(b3) {
+                    mvs.push_back(ENCODE_MOVE(square, bit::pop_lsb_index(b3), CAPTURE));
+                    b3 &= (b3-1);
+                }
+                b1 &= (b1-1);
             }
-            take_move<player>(board);
-            it++;
+
+            // Find not pinned sliding pieces
+            b1 = (player_diag_bb | player_orth_bb | player_knights_bb) & not_pinned;
+            while(b1) {
+                square = bit::pop_lsb_index(b1);
+                if(board[square].first == BISHOP) b2 = moves::diagonal_attacks(all_bb, square);
+                else if(board[square].first == ROOK) b2 = moves::orthogonal_attacks(all_bb, square);
+                else if(board[square].first == QUEEN) b2 = moves::diagonal_attacks(all_bb, square) | moves::orthogonal_attacks(all_bb, square);
+                else b2 = KNIGHT_ATTACKS[square];
+                b3 = b2 & (~all_bb);
+                while(b3) {
+                    mvs.push_back(ENCODE_MOVE(square, bit::pop_lsb_index(b3), QUIET));
+                    b3 &= (b3-1);
+                }
+                b3 = b2 & enemy_bb;
+                while(b3) {
+                    mvs.push_back(ENCODE_MOVE(square, bit::pop_lsb_index(b3), CAPTURE));
+                    b3 &= (b3-1);
+                }
+                b1 &= (b1-1);
+            }
+
+            // Find pinned pawns
+            b1 = player_pawns_bb & pinned;
+
+            b3 = (player == WHITE ? MAIN_DIAGONAL_MASK[player_king_square] : MINOR_DIAGONAL_MASK[player_king_square]);
+            b4 = (player == WHITE ? MINOR_DIAGONAL_MASK[player_king_square] : MAIN_DIAGONAL_MASK[player_king_square]);
+
+            // A pinned pawn can promote just if its capture square is diagonally aligned with the king
+            b2 = enemy_bb & moves::pawns_attacks_west<player>(b1 & PAWN_SPECIAL_RANK_MASK[enemy]) & b3;
+
+            // First direction
+            if(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][1], square, PC_B));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][1], square, PC_Q));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][1], square, PC_N));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][1], square, PC_R));
+            }
+
+            b2 = enemy_bb & moves::pawns_attacks_east<player>(b1 & PAWN_SPECIAL_RANK_MASK[enemy]) & b4;
+
+            // Then the other one
+            if(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][2], square, PC_B));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][2], square, PC_Q));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][2], square, PC_N));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][2], square, PC_R));
+            }
+
+            // Find pinned captures
+            b2 = enemy_bb & moves::pawns_attacks_west<player>(b1 & ~PAWN_SPECIAL_RANK_MASK[enemy]) & b3;
+
+            if(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][1], square, CAPTURE));
+            }
+
+            b2 = enemy_bb & moves::pawns_attacks_east<player>(b1 & ~PAWN_SPECIAL_RANK_MASK[enemy]) & b4;
+
+            if(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][2], square, CAPTURE));
+            }
+
+            // Double pinned moves
+            b2 = b1 & PAWN_SPECIAL_RANK_MASK[player];
+
+            if(player == WHITE) b2 = (((b2 << 8) & ~all_bb) << 8) & ~all_bb;
+            else b2 = (((b2 >> 8) & ~all_bb) >> 8) & ~all_bb;
+            b2 &= VERTICAL_MASK[player_king_square];
+
+            if(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][3] , square, PAWN_DOUBLE));
+            }
+
+            // Single pinned moves
+            b2 = moves::pawns_forward<player>(b1) & (~all_bb) & VERTICAL_MASK[player_king_square];
+
+            if(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][0] , square, PAWN_QUIET));
+            }
+
+            // Find not pinned pawns
+            b1 = player_pawns_bb & not_pinned & PAWN_SPECIAL_RANK_MASK[enemy];
+
+            // Quiet promotions
+            b2 = moves::pawns_forward<player>(b1) & (~all_bb);
+
+            while(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][0], square, PQ_B));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][0], square, PQ_Q));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][0], square, PQ_N));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][0], square, PQ_R));
+                b2 &= (b2-1);
+            }
+
+            // Attack promotions
+            b2 = moves::pawns_attacks_west<player>(b1) & enemy_bb;
+            while(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][1], square, PC_B));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][1], square, PC_Q));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][1], square, PC_N));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][1], square, PC_R));
+                b2 &= (b2-1);
+            }
+
+            b2 = moves::pawns_attacks_east<player>(b1) & enemy_bb;
+            while(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][2], square, PC_B));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][2], square, PC_Q));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][2], square, PC_N));
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][2], square, PC_R));
+                b2 &= (b2-1);
+            }
+
+            // Find not pinned pawns which can attack and aren't within the special mask rank
+            b1 = player_pawns_bb & ~PAWN_SPECIAL_RANK_MASK[enemy] & not_pinned;
+
+            // East attacks
+            b2 = moves::pawns_attacks_east<player>(b1) & enemy_bb;
+
+            while(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][2], square, CAPTURE));
+                b2 &= (b2-1);
+            }
+
+            // West attacks
+            b2 = moves::pawns_attacks_west<player>(b1) & enemy_bb;
+
+            while(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][1], square, CAPTURE));
+                b2 &= (b2-1);
+            }
+
+            // Find not pinned pawns which can double move
+            b2 = b1 & PAWN_SPECIAL_RANK_MASK[player];
+
+            if(player == WHITE) b2 = (((b2 << 8) & ~all_bb) << 8) & ~all_bb;
+            else b2 = (((b2 >> 8) & ~all_bb) >> 8) & ~all_bb;
+
+            while(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][3] , square, PAWN_DOUBLE));
+                b2 &= (b2-1);
+            }
+
+            // Find not pinned pawns which can make a quiet move
+            b2 = moves::pawns_forward<player>(b1) & (~all_bb);
+
+            while(b2) {
+                square = bit::pop_lsb_index(b2);
+                mvs.push_back(ENCODE_MOVE(square - OFFSET[player][0], square, PAWN_QUIET));
+                b2 &= (b2-1);
+            }
         }
     }
 
@@ -1218,9 +1434,9 @@ namespace virgo {
         this->pieces[f.second][f.first] |= (1ull << to);
         this->all |= (1ull << to);
 
-        auto & temp = t;
-        t = f;
-        f = temp;
+        t.first = f.first;
+        t.second = f.second;
+        f.first = EMPTY;
 
         if(t.first == KING) {
             this->king_position[t.second] = to;
@@ -1244,8 +1460,10 @@ namespace virgo {
         this->all |= (1ull << square);
     }
 
-    // It initializes Virgo's Kindergarten lookup tables
+    // It initializes Virgo's lookup tables
     void virgo_init() {
+
+        // Kindergarten bitboards init
         std::vector<uint8_t> first_rank_permutations;
         permutations::find_binary_permutations(0, 8, first_rank_permutations);
         for(int i = 0; i < 8; i++) {
@@ -1262,6 +1480,37 @@ namespace virgo {
                 KINDERGARTEN_ROTATED[i][u] = bit::rotate_counter_clockwise64(KINDERGARTEN[i][u]);
             }
         }
+
+        // Square bitboards init
+        SQUARE_MASK[64] = 0ull;
+        for(int square = 0; square < 64; square++)
+            SQUARE_MASK[square] = 1ull << square;
+
+        // Lines and ranges bitboards masks init
+        for(int s = 0; s < 64; s++) {
+            for(int t = 0; t < 64; t++) {
+                LINE_MASK[s][t] = 0ull;
+                FROM_TO_MASK[s][t] = 0ull;
+                if(s == t) continue;
+                uint64_t mask = SQUARE_MASK[s] | SQUARE_MASK[t] | ((SQUARE_MASK[t] - 1) ^ (SQUARE_MASK[s] - 1));
+                if((s & 0x7) == (t & 0x7) && (s >> 3) != (t >> 3)) {
+                    FROM_TO_MASK[s][t] = mask & VERTICAL_MASK[s];
+                    LINE_MASK[s][t] = VERTICAL_MASK[s];
+                }
+                else if((s & 0x7) != (t & 0x7) && (s >> 3) == (t >> 3)) {
+                    FROM_TO_MASK[s][t] = mask & HORIZONTAL_MASK[s];
+                    LINE_MASK[s][t] = HORIZONTAL_MASK[s];
+                }
+                else if(bit::main_diagonal_index(s) == bit::main_diagonal_index(t)) {
+                    FROM_TO_MASK[s][t] = mask & MAIN_DIAGONAL_MASK[s];
+                    LINE_MASK[s][t] = MAIN_DIAGONAL_MASK[s];
+                }
+                else if(bit::minor_diagonal_index(s) == bit::minor_diagonal_index(t)) {
+                    FROM_TO_MASK[s][t] = mask & MINOR_DIAGONAL_MASK[s];
+                    LINE_MASK[s][t] = MINOR_DIAGONAL_MASK[s];
+                }
+            }
+        }
     }
 
 /////////////////////////////////////////////////////////////////////// TEST HELPERS ///////////////////////////////////////////////////////////////////////////////////
@@ -1270,14 +1519,14 @@ namespace virgo {
         template <Player player> long int perft(int d, Chessboard & board) {
             if(d == 0) return 1;
 
-            std::vector<uint32_t> moves;
+            std::vector<uint16_t> moves;
             virgo::get_legal_moves<player>(board, moves);
 
             uint64_t total_moves_count = 0;
             constexpr Player enemy = static_cast<const Player>(player ^ 1);
 
             // For each legal move do it and go deeper
-            for(uint32_t & move : moves) {
+            for(uint16_t & move : moves) {
 
                 // Make the move
                 virgo::make_move<player>(move, board);
@@ -1294,19 +1543,26 @@ namespace virgo {
 /////////////////////////////////////////////////////////////////////// PUBLIC STRING HELPERS //////////////////////////////////////////////////////////////////////////
     namespace string {
         // Given a uint32_t representing a move it returns the corresponding string
-        inline std::string move_to_string(uint32_t move) {
+        inline std::string move_to_string(uint16_t move) {
             const static char pieces[7] = {'p', 'r', 'n', 'b', 'k', 'q', '\0'};
 
             unsigned int f = MOVE_FROM(move);
             unsigned int t = MOVE_TO(move);
-            unsigned int p = MOVE_PROMOTION(move);
 
             std::string move_str = {};
             move_str.push_back('a' + (f & 0x7));
             move_str.push_back('1' + (f >> 3));
             move_str.push_back('a' + (t & 0x7));
             move_str.push_back('1' + (t >> 3));
-            move_str.push_back(pieces[p]);
+
+            if(MOVE_TYPE(move) == PC_R || MOVE_TYPE(move) == PQ_R)
+                move_str.push_back('r');
+            else if(MOVE_TYPE(move) == PC_N || MOVE_TYPE(move) == PQ_N)
+                move_str.push_back('n');
+            else if(MOVE_TYPE(move) == PC_Q || MOVE_TYPE(move) == PQ_Q)
+                move_str.push_back('q');
+            else if(MOVE_TYPE(move) == PC_B || MOVE_TYPE(move) == PQ_B)
+                move_str.push_back('b');
 
             return move_str;
         }

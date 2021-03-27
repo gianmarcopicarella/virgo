@@ -60,9 +60,9 @@ int main() {
 <!-- FUTURE IMPROVEMENTS -->
 ## Future improvements
 
-* [ ] Code a minimal Magic bitboards moves lookup 
-* [x] Reduce move's size to 16bit
-* [x] Reduce the search tree by avoiding illegal moves generation by design <br/>
+* [ ] Magic bitboards lookup table 
+* [x] Move representation size to 16bit
+* [x] Avoid illegal moves by design <br/>
 
 <!-- CONTRIBUTING -->
 ## Contributing

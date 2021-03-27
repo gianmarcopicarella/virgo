@@ -62,7 +62,7 @@ int main() {
 
 * [ ] Magic bitboards lookup table 
 * [x] Move representation size to 16bit
-* [x] Avoid illegal moves by design <br/>
+* [x] Avoids illegal moves by design <br/>
 
 <!-- CONTRIBUTING -->
 ## Contributing

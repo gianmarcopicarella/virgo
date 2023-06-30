@@ -30,6 +30,7 @@ SOFTWARE.
 #include <vector>
 #include <regex>
 #include <iostream>
+#include <map>
 
 #define ENCODE_MOVE(from, to, type) (0x0000u | (from) | ((to) << 6) | ((type) << 12))
 #define MOVE_FROM(move) ((move) & 0x3f)
@@ -618,16 +619,16 @@ namespace virgo {
         this->pieces[0][ROOK] = 0x8100000000000000; // Rooks
         this->pieces[0][KNIGHT] = 0x4200000000000000; // Knights
         this->pieces[0][BISHOP] = 0x2400000000000000; // Bishops
-        this->pieces[0][KING] = 0x0800000000000000; // King
-        this->pieces[0][QUEEN] = 0x1000000000000000; // Queen
+        this->pieces[0][KING] = 0x1000000000000000; // King
+        this->pieces[0][QUEEN] = 0x0800000000000000; // Queen
 
         // Set white pieces
         this->pieces[1][PAWN] = 0x000000000000ff00; // Pawns
         this->pieces[1][ROOK] = 0x0000000000000081; // Rooks
         this->pieces[1][KNIGHT] = 0x0000000000000042; // Knights
         this->pieces[1][BISHOP] = 0x0000000000000024; // Bishops
-        this->pieces[1][KING] = 0x0000000000000008; // King
-        this->pieces[1][QUEEN] = 0x0000000000000010; // Queen
+        this->pieces[1][KING] = 0x0000000000000010; // King
+        this->pieces[1][QUEEN] = 0x0000000000000008; // Queen
 
         // Fill with empty values
         for(int s = a1; s <= h8; s++) {

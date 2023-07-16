@@ -30,6 +30,7 @@ SOFTWARE.
 #include <vector>
 #include <regex>
 #include <iostream>
+#include <map>
 
 #define ENCODE_MOVE(from, to, type) (0x0000u | (from) | ((to) << 6) | ((type) << 12))
 #define MOVE_FROM(move) ((move) & 0x3f)

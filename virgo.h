@@ -737,12 +737,12 @@ namespace virgo {
                 continue;
             }
             if(std::tolower(c) == 'k') {
-                int color = std::isupper(c);
+                int color = std::isupper(static_cast<unsigned char>(c)) ? WHITE : BLACK;
                 kings[color]++;
             }
 
             if(std::isalpha(c)) {
-                int color = std::isupper(c);
+                int color = std::isupper(static_cast<unsigned char>(c)) ? WHITE : BLACK;
                 board.pieces[color][indexes.at(std::tolower(c))] |= 1ull << square;
                 board.squares[square++] = std::make_pair(indexes.at(std::tolower(c)), static_cast<Player>(color));
 
